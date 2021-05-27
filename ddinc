@@ -1,0 +1,239 @@
+#!/bin/bash
+
+# Define sane values for all options
+input=()
+input_is_text_file=0
+backup=""
+restore=""
+output=""
+dd_options=""
+xdelta_options=""
+xz_options=""
+use_compression=1
+quiet_mode=0
+
+# Get the options
+while getopts "i:fb:r:o:d:l:x:nq?" option
+do
+  case $option in
+    i)
+      # Save the option parameter as an array
+      input=("$OPTARG")
+
+      # Loop through any additional option parameters and add them to the array
+      while [[ -n ${!OPTIND} ]] && [[ ${!OPTIND} != -* ]]
+      do
+        input+=("${!OPTIND}")
+        OPTIND=$((OPTIND + 1))
+      done
+      ;;
+    f)
+      input_is_text_file=1
+      ;;
+    b)
+      backup="$OPTARG"
+      ;;
+    r)
+      restore="$OPTARG"
+      ;;
+    o)
+      output="$OPTARG"
+      ;;
+    d)
+      dd_options=" $OPTARG"
+      ;;
+    l)
+      xdelta_options=" $OPTARG"
+      ;;
+    x)
+      xz_options=" $OPTARG"
+      ;;
+    n)
+      use_compression=0
+      ;;
+    q)
+      quiet_mode=1
+      ;;
+    ?) 
+      echo "Usage: ddinc [-i files...] [-f] (-b file_or_device | -r file) [-o file_or_device] [-d dd_options] [-l xdelta3 options] [-x xz_options] [-n] [-q]"
+      echo
+      echo "-i   dependee input files"
+      echo "-f   -i specifies a text file containing list of dependee input files"
+      echo "-b   file or device to backup"
+      echo "-r   file to restore"
+      echo "-o   output file or device"
+      echo "-d   string containing options passed to dd for reading in backup mode and writing in restore mode"
+      echo "-l   string containing options passed to xdelta3 for encoding"
+      echo "-x   string containing options passed to xz for compression"
+      echo "-n   do not use compression"
+      echo "-q   quiet mode"
+      echo
+      echo "Backup example"
+      echo "ddinc -i ../January/sda.dd.xz ../February/sda.dd.xdelta.xz ../March/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
+      echo "ddinc -i sda.dd.dependees -f -b /dev/sda -o sda.dd.xdelta.xz"
+      echo
+      echo "Restore example"
+      echo "ddinc -i ../January/sda.dd.xz ../February/sda.dd.xdelta.xz ../March/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
+      echo "ddinc -i sda.dd.dependees -f -r sda.dd.xdelta.xz -o /dev/sda"
+
+      exit 0
+      ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+# Verify the options
+if [[ -z $backup ]] && [[ -z $restore ]]
+then
+  echo "No backup file or restore file specified.  See help (-?) for details."
+  exit 1
+fi
+
+# Check if the input option is a text file containing the actual input files
+if [[ $input_is_text_file -eq 1 ]]
+then
+  # Load the file into the input array
+  mapfile -t input < ${input[0]}
+fi
+
+# Get the input array length
+input_size=${#input[@]}
+
+# Loop through the input array and build the xdelta3 source portion of the command
+for i in ${!input[@]}
+do
+  # Check if this is the first element in the array
+  if [[ $i -eq 0 ]]
+  then
+    # Check if compression is enabled and build the command for this full input file
+    if [[ $use_compression -eq 1 ]]
+    then
+      command="<(xz -d -c ${input[$i]})"
+    else
+      command="${input[$i]}"
+    fi
+  else
+    # Build the command for this incremental input file
+    command="<(xdelta3 -d -c -s $command"
+
+    # Check if compression is enabled
+    if [[ $use_compression -eq 1 ]]
+    then
+      command="$command <(xz -d -c ${input[$i]})"
+    else
+      command="$command ${input[$i]}"
+    fi
+
+    # Finish building the command
+    command="$command)"
+  fi
+done
+
+# Check if a backup file was specified
+if [[ -n $backup ]]
+then
+  # Check if no input files were specified
+  if [[ $input_size -eq 0 ]]
+  then
+    # Build the command for a full backup
+    command="dd if=$backup$dd_options"
+
+    # Check if compression is enabled
+    if [[ $use_compression -eq 1 ]]
+    then
+      command="$command | xz -z -c$xz_options"
+    fi
+
+    # Check if an output was specified
+    if [[ -n $output ]]
+    then
+      command="$command > $output"
+    fi
+  else
+    # Build the command for an incremental backup
+    command="xdelta3 -e -c -s $command$xdelta_options <(dd if=$backup$dd_options)"
+
+    # Check if compression is enabled
+    if [[ $use_compression -eq 1 ]]
+    then
+      command="$command | xz -z -c$xz_options"
+    fi
+
+    # Check if an output was specified
+    if [[ -n $output ]]
+    then
+      command="$command > $output"
+    fi
+  fi
+else
+  # Check if no input files were specified
+  if [[ $input_size -eq 0 ]]
+  then
+    # Check if compression is enabled
+    if [[ $use_compression -eq 1 ]]
+    then
+      # Build the command for a full restore with decompression
+      command="xz -d -c $restore | dd"
+
+      # Check if an output was specified
+      if [[ -n $output ]]
+      then
+        command="$command of=$output"
+      fi
+
+      # Finish building the command
+      command="$command$dd_options"
+    else
+      # Build the command for a full restore without decompression
+      command="dd"
+
+      # Check if an output was specified
+      if [[ -n $output ]]
+      then
+        command="$command of=$output"
+      fi
+
+      # Finish building the command
+      command="$command$dd_options < $restore"
+    fi
+  else
+    # Build the command for an incremental restore
+    command="xdelta3 -d -c -s $command"
+
+    # Check if compression is enabled
+    if [[ $use_compression -eq 1 ]]
+    then
+      command="$command <(xz -d -c $restore) | dd"
+    else
+      command="$command < $restore | dd"
+    fi
+
+    # Check if an output is specified
+    if [[ -n $output ]]
+    then
+      command="$command of=$output"
+    fi
+
+    # Finish building the command
+    command="$command$dd_options"
+  fi
+fi
+
+# Run the command
+if [[ $quiet_mode -eq 1 ]]
+then
+  bash -c "$command"
+  exit $?
+else
+  echo "Command that will be run: $command" >&2
+  read -p "Continue (Y/n)?" -n 1 -r
+  if [[ -n $REPLY ]]
+  then
+    echo "" >&2
+  fi
+  if [[ -z $REPLY ]] || [[ $REPLY =~ ^[Yy]$ ]]
+  then
+    bash -c "$command"
+    exit $?
+  fi
+fi
