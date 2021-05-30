@@ -27,7 +27,7 @@ use_compression=0
 quiet_mode=0
 
 # Get the options
-while getopts "i:f:b:r:o:d:l:cx:q?" option
+while getopts "i:f:b:r:o:d:l:cx:qh" option
 do
   case $option in
     i)
@@ -61,7 +61,7 @@ do
     q)
       quiet_mode=1
       ;;
-    ?) 
+    h)
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]"\
            "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [-q]"
       echo
@@ -77,6 +77,7 @@ do
       echo "-c   use compression"
       echo "-x   string containing options passed to xz for compression"
       echo "-q   quiet mode"
+      echo "-h   show help"
       echo
       echo "Backup example"
       echo "ddinc -i ../January/sda.dd.xz -i ../February/sda.dd.xdelta.xz"\
@@ -97,7 +98,7 @@ shift $((OPTIND - 1))
 # Verify the options
 if [[ -z $backup ]] && [[ -z $restore ]]
 then
-  echo "No backup file or restore file specified.  See help (-?) for details."
+  echo "No backup file or restore file specified.  See help (-h) for details."
   exit 1
 fi
 
@@ -105,7 +106,14 @@ fi
 
 # Create a function called to build the source portion of the command
 function build_source_portion()
-{  
+{
+  # Save passed in variables
+  local input=("${!1}")
+  local use_compression=$2
+
+  # Declare local variables
+  local command=""
+
   # Loop through the input array and build the xdelta3 source portion of the command
   for i in ${!input[@]}
   do
@@ -136,13 +144,23 @@ function build_source_portion()
       command="$command)"
     fi
   done
+
+  # Return the source portion of the command
+  echo $command
 }
 
 # Create a function called to build a full backup command
 function build_full_backup_command()
 {
+  # Save passed in variables
+  local backup=$1
+  local ouput=$2
+  local dd_options=$3
+  local use_compression=$4
+  local xz_options=$5
+
   # Build the command for a full backup
-  command="dd if=$backup$dd_options"
+  local command="dd if=$backup$dd_options"
 
   # Check if compression is enabled and continue building the command
   if [[ $use_compression -eq 1 ]]
@@ -155,13 +173,25 @@ function build_full_backup_command()
   then
     command="$command > $output"
   fi
+
+  # Return the command for a full backup
+  echo $command
 }
 
 # Create a function called to build an incremental backup command
 function build_incremental_backup_command()
 {
+  # Save passed in variables
+  local input=("${!1}")
+  local backup=$2
+  local output=$3
+  local dd_options=$4
+  local xdelta_options=$5
+  local use_compression=$6
+  local xz_options=$7
+
   # Call the build_source_portion function to build the source portion of the command
-  build_source_portion
+  local command=$(build_source_portion input[@] $use_compression)
 
   # Build the command for an incremental backup
   command="xdelta3 -e -c -s $command$xdelta_options <(dd if=$backup$dd_options)"
@@ -177,11 +207,23 @@ function build_incremental_backup_command()
   then
     command="$command > $output"
   fi
+
+  # Return the command for an incremental backup
+  echo $command
 }
 
 # Create a function called to build a full restore command
 function build_full_restore_command()
 {
+  # Save passed in variables
+  local restore=$1
+  local output=$2
+  local dd_options=$3
+  local use_compression=$4
+
+  # Declare local variables
+  local command=""
+
   # Check if compression is disabled/enabled and build the command for a full restore
   if [[ $use_compression -eq 0 ]]
   then
@@ -204,13 +246,23 @@ function build_full_restore_command()
   then
     command="$command < $restore"
   fi
+
+  # Return the command for a full restore
+  echo $command
 }
 
 # Create a function called to build an incremental restore command
 function build_incremental_restore_command()
 {
+  # Save the passed in variables
+  local input=("${!1}")
+  local restore=$2
+  local output=$3
+  local dd_options=$4
+  local use_compression=$5
+
   # Call the build_source_portion function to build the source portion of the command
-  build_source_portion
+  local command=$(build_source_portion input[@] $use_compression)
 
   # Build the command for an incremental restore
   command="xdelta3 -d -c -s $command"
@@ -231,6 +283,9 @@ function build_incremental_restore_command()
 
   # Finish building the command
   command="$command$dd_options"
+
+  # Return the command for an incremental restore
+  echo $command
 }
 
 # Check if a backup file was specified
@@ -239,17 +294,20 @@ then
   # Check if input files were specified and call the correct function to build the command
   if [[ ${#input[@]} -eq 0 ]]
   then
-    build_full_backup_command
+    command=$(build_full_backup_command "$backup" "$output" "$dd_options" "$use_compression" \
+      "$xz_options")
   else
-    build_incremental_backup_command
+    command=$(build_incremental_backup_command input[@] "$backup" "$output" "$dd_options" \
+      "$xdelta_options" "$use_compression" "$xz_options")
   fi
 else
   # Check if input files were specified and call the correct function to build the command
   if [[ ${#input[@]} -eq 0 ]]
   then
-    build_full_restore_command
+    command=$(build_full_restore_command "$restore" "$output" "$dd_options" "$use_compression")
   else
-    build_incremental_restore_command
+    command=$(build_incremental_restore_command input[@] "$restore" "$output" "$dd_options" \
+      "$use_compression")
   fi
 fi
 
