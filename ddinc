@@ -15,27 +15,65 @@
 # http://www.gnu.org/copyleft/gpl.html or write to The Free Software Foundation, 675 Mass Ave,
 # Cambridge, MA 02139, USA.
 
-# Define sane values for all options
-input=()
-backup=""
-restore=""
-output=""
-dd_options=""
-xdelta_options=""
-xz_options=""
-use_compression=0
-quiet_mode=0
+# Function called to check if a needed command is available
+function check_if_available()
+{
+  if ! command -v "$1" > /dev/null
+  then
+    echo "Command $1 is required but is not available."
+    exit 1
+  fi
+}
+
+# Check if the needed commands are available
+check_if_available "dd"
+check_if_available "xdelta3"
+
+# Declare all options variables
+declare -a inputs
+declare backup
+declare restore
+declare output
+declare dd_options
+declare xdelta_options
+declare xz_options
+declare -i use_compression=0
+declare -i quiet_mode=0
 
 # Get the options
 while getopts "i:f:b:r:o:d:l:cx:qh" option
 do
   case $option in
     i)
-      input+=("$OPTARG")
+      inputs+=("$OPTARG")
       ;;
     f)
-      # TODO: add to the input array content instead of replacing all content
-      mapfile -t input < "$OPTARG"
+      # Read the file paths into an array
+      declare -a paths
+      mapfile -t paths < "$OPTARG"
+
+      # Get the dependees file path (without relying on dirname command)
+      declare dependees_file_path
+      if [[ "$OPTARG" != *"/"* ]]
+      then
+        dependees_file_path="."
+      else
+        dependees_file_path="${OPTARG%/*}"
+      fi
+
+      # Loop through the file paths
+      for i in "${!paths[@]}"
+      do
+        # Check if the path is relative
+        if [[ "${paths[$i]}" != "/"* ]]
+        then
+          # Prepend the dependees file path to the path
+          paths[$i]="$dependees_file_path/${paths[$i]}"
+        fi
+      done
+
+      # Append the file paths to the inputs array
+      inputs+=("${paths[@]}")
       ;;
     b)
       backup="$OPTARG"
@@ -53,6 +91,10 @@ do
       xdelta_options=" $OPTARG"
       ;;
     c)
+      # Check if xz command is available
+      check_if_available "xz"
+
+      # Set the compression flag
       use_compression=1
       ;;
     x)
@@ -62,16 +104,16 @@ do
       quiet_mode=1
       ;;
     h)
-      echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]"\
+      echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
            "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [-q]"
       echo
       echo "-i   dependee input file (can be specified multiple times)"
-      echo "-f   text file containing list of dependee input files (can be specified multiple"\
-           "times)"
+      echo "-f   file containing list of dependee input files (using absolute paths or paths" \
+           "relative to this file) (can be specified multiple times)"
       echo "-b   file or device to backup"
       echo "-r   file to restore"
-      echo "-o   output file or device"
-      echo "-d   string containing options passed to dd for reading in backup mode and writing"\
+      echo "-o   output file or device (uses stdout if not specified)"
+      echo "-d   string containing options passed to dd for reading in backup mode and writing" \
            "in restore mode"
       echo "-l   string containing options passed to xdelta3 for encoding"
       echo "-c   use compression"
@@ -79,14 +121,14 @@ do
       echo "-q   quiet mode"
       echo "-h   show help"
       echo
-      echo "Backup example"
-      echo "ddinc -i ../January/sda.dd.xz -i ../February/sda.dd.xdelta.xz"\
-           "-i ../March/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
+      echo "Backup examples"
+      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
+           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
       echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz"
       echo
-      echo "Restore example"
-      echo "ddinc -i ../January/sda.dd.xz -i ../February/sda.dd.xdelta.xz"\
-           "-i ../March/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
+      echo "Restore examples"
+      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
+           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
       echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda"
 
       exit 0
@@ -95,27 +137,35 @@ do
 done
 shift $((OPTIND - 1))
 
-# Verify the options
+# Make sure backup or restore was specified
 if [[ -z $backup ]] && [[ -z $restore ]]
 then
   echo "No backup file or restore file specified.  See help (-h) for details."
   exit 1
 fi
 
-# TODO: verify that all of the various files specified actually exist
+# Make sure all input files exist and are not directories
+for input in "${inputs[@]}"
+do
+  if [[ ! -e "$input" ]] || [[ -d "$input" ]]
+  then
+    echo "Input file $input does not exist."
+    exit 1
+  fi
+done
 
 # Create a function called to build the source portion of the command
 function build_source_portion()
 {
   # Save passed in variables
-  local input=("${!1}")
+  local inputs=("${!1}")
   local use_compression=$2
 
   # Declare local variables
-  local command=""
+  local command
 
-  # Loop through the input array and build the xdelta3 source portion of the command
-  for i in ${!input[@]}
+  # Loop through the inputs array and build the xdelta3 source portion of the command
+  for i in "${!inputs[@]}"
   do
     # Check if this is the first element in the array
     if [[ $i -eq 0 ]]
@@ -124,9 +174,9 @@ function build_source_portion()
       # file
       if [[ $use_compression -eq 0 ]]
       then
-        command="${input[$i]}"
+        command="\"${inputs[$i]}\""
       else
-        command="<(xz -d -c ${input[$i]})"
+        command="<(xz -d -c \"${inputs[$i]}\")"
       fi
     else
       # Build the source portion for this incremental input file
@@ -135,9 +185,9 @@ function build_source_portion()
       # Check if compression is disabled/enabled and continue building the source portion
       if [[ $use_compression -eq 0 ]]
       then
-        command="$command ${input[$i]}"
+        command="$command \"${inputs[$i]}\""
       else
-        command="$command <(xz -d -c ${input[$i]})"
+        command="$command <(xz -d -c \"${inputs[$i]}\")"
       fi
 
       # Finish building the source portion
@@ -160,7 +210,7 @@ function build_full_backup_command()
   local xz_options=$5
 
   # Build the command for a full backup
-  local command="dd if=$backup$dd_options"
+  local command="dd if=\"$backup\"$dd_options"
 
   # Check if compression is enabled and continue building the command
   if [[ $use_compression -eq 1 ]]
@@ -171,7 +221,7 @@ function build_full_backup_command()
   # Check if an output was specified and finish building the command
   if [[ -n $output ]]
   then
-    command="$command > $output"
+    command="$command > \"$output\""
   fi
 
   # Return the command for a full backup
@@ -182,7 +232,7 @@ function build_full_backup_command()
 function build_incremental_backup_command()
 {
   # Save passed in variables
-  local input=("${!1}")
+  local inputs=("${!1}")
   local backup=$2
   local output=$3
   local dd_options=$4
@@ -191,10 +241,10 @@ function build_incremental_backup_command()
   local xz_options=$7
 
   # Call the build_source_portion function to build the source portion of the command
-  local command=$(build_source_portion input[@] $use_compression)
+  local command=$(build_source_portion inputs[@] $use_compression)
 
   # Build the command for an incremental backup
-  command="xdelta3 -e -c -s $command$xdelta_options <(dd if=$backup$dd_options)"
+  command="xdelta3 -e -c -s $command$xdelta_options <(dd if=\"$backup\"$dd_options)"
 
   # Check if compression is enabled and continue building the command
   if [[ $use_compression -eq 1 ]]
@@ -205,7 +255,7 @@ function build_incremental_backup_command()
   # Check if an output was specified and finish building the command
   if [[ -n $output ]]
   then
-    command="$command > $output"
+    command="$command > \"$output\""
   fi
 
   # Return the command for an incremental backup
@@ -222,20 +272,20 @@ function build_full_restore_command()
   local use_compression=$4
 
   # Declare local variables
-  local command=""
+  local command
 
   # Check if compression is disabled/enabled and build the command for a full restore
   if [[ $use_compression -eq 0 ]]
   then
     command="dd"
   else
-    command="xz -d -c $restore | dd"
+    command="xz -d -c \"$restore\" | dd"
   fi
 
   # Check if an output was specified and continue building the command
   if [[ -n $output ]]
   then
-    command="$command of=$output"
+    command="$command of=\"$output\""
   fi
 
   # Continue building the command
@@ -244,7 +294,7 @@ function build_full_restore_command()
   # Check if compression is disabled and finish building the command
   if [[ $use_compression -eq 0 ]]
   then
-    command="$command < $restore"
+    command="$command < \"$restore\""
   fi
 
   # Return the command for a full restore
@@ -255,14 +305,14 @@ function build_full_restore_command()
 function build_incremental_restore_command()
 {
   # Save the passed in variables
-  local input=("${!1}")
+  local inputs=("${!1}")
   local restore=$2
   local output=$3
   local dd_options=$4
   local use_compression=$5
 
   # Call the build_source_portion function to build the source portion of the command
-  local command=$(build_source_portion input[@] $use_compression)
+  local command=$(build_source_portion inputs[@] $use_compression)
 
   # Build the command for an incremental restore
   command="xdelta3 -d -c -s $command"
@@ -270,15 +320,15 @@ function build_incremental_restore_command()
   # Check if compression is disabled/enabled and continue building the command
   if [[ $use_compression -eq 0 ]]
   then
-    command="$command < $restore | dd"
+    command="$command < \"$restore\" | dd"
   else
-    command="$command <(xz -d -c $restore) | dd"
+    command="$command <(xz -d -c \"$restore\") | dd"
   fi
 
   # Check if an output is specified and continue building the command
   if [[ -n $output ]]
   then
-    command="$command of=$output"
+    command="$command of=\"$output\""
   fi
 
   # Finish building the command
@@ -292,21 +342,21 @@ function build_incremental_restore_command()
 if [[ -n $backup ]]
 then
   # Check if input files were specified and call the correct function to build the command
-  if [[ ${#input[@]} -eq 0 ]]
+  if [[ ${#inputs[@]} -eq 0 ]]
   then
     command=$(build_full_backup_command "$backup" "$output" "$dd_options" "$use_compression" \
       "$xz_options")
   else
-    command=$(build_incremental_backup_command input[@] "$backup" "$output" "$dd_options" \
+    command=$(build_incremental_backup_command inputs[@] "$backup" "$output" "$dd_options" \
       "$xdelta_options" "$use_compression" "$xz_options")
   fi
 else
   # Check if input files were specified and call the correct function to build the command
-  if [[ ${#input[@]} -eq 0 ]]
+  if [[ ${#inputs[@]} -eq 0 ]]
   then
     command=$(build_full_restore_command "$restore" "$output" "$dd_options" "$use_compression")
   else
-    command=$(build_incremental_restore_command input[@] "$restore" "$output" "$dd_options" \
+    command=$(build_incremental_restore_command inputs[@] "$restore" "$output" "$dd_options" \
       "$use_compression")
   fi
 fi
