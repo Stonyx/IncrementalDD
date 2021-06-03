@@ -29,7 +29,7 @@ function is_available()
 function build_source_portion()
 {
   # Save passed in variables
-  local -a input_files=("${!1}")
+  input_files=("${!1}")
   local -i use_compression=$2
 
   # Declare local variables
@@ -103,7 +103,7 @@ function build_full_backup_command()
 function build_incremental_backup_command()
 {
   # Save passed in variables
-  local -a input_files=("${!1}")
+  input_files=("${!1}")
   local backup_file="$2"
   local output_file="$3"
   local dd_options="$4"
@@ -178,7 +178,7 @@ function build_full_restore_command()
 function build_incremental_restore_command()
 {
   # Save the passed in variables
-  local input_files=("${!1}")
+  input_files=("${!1}")
   local restore_file="$2"
   local output_file="$3"
   local dd_options="$4"
@@ -345,7 +345,7 @@ then
   echo "No backup file or restore file specified.  See help (-h) for details."
   exit 1
 fi
-if [[ -n "$backup_file" ]] && [[ -n "$restore_file " ]]
+if [[ -n "$backup_file" ]] && [[ -n "$restore_file" ]]
 then
   echo "Both backup and restore file was specified.  See help (-h) for details."
   exit 1
@@ -379,7 +379,7 @@ else
   # Check if input files were specified and call the correct function to build the command
   if [[ ${#input_files[@]} -eq 0 ]]
   then
-    command="$(build_full_restore_command "$restore" "$output_file" "$dd_options" \
+    command="$(build_full_restore_command "$restore_file" "$output_file" "$dd_options" \
       "$use_compression")"
   else
     command="$(build_incremental_restore_command input_files[@] "$restore_file" "$output_file" \
