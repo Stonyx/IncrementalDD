@@ -155,7 +155,7 @@ function build_full_restore_command()
     command="xz -d -c \"$restore_file\""
 
     # Check if an output file or dd options were specified and continue building the command
-    if [[ -n "$output_file" ]] || [[ -n "$dd_options" ]]
+    if [[ -n "$output_file" || -n "$dd_options" ]]
     then
       command="$command | dd"
     fi
@@ -199,7 +199,7 @@ function build_incremental_restore_command()
   fi
 
   # Check if an output file or dd options were specified and continue building the command
-  if [[ -n "$output_file" ]] || [[ -n "$dd_options" ]]
+  if [[ -n "$output_file" || -n "$dd_options" ]]
   then
     command="$command | dd"
   fi
@@ -217,17 +217,13 @@ function build_incremental_restore_command()
   echo $command
 }
 
-# Check if dd and xdelta3 commands are available
-is_available "dd"
-is_available "xdelta3"
-
 # Declare all options variables
 declare -a input_files
 declare backup_file
 declare restore_file
 declare output_file
-declare dd_options
-declare xdelta_options
+declare dd_options=" status=progress"
+declare xdelta_options=" -T 0"
 declare xz_options
 declare -i use_compression=0
 declare -i ask_for_confirmation=0
@@ -285,10 +281,6 @@ do
       xdelta_options=" $OPTARG"
       ;;
     c)
-      # Check if xz command is available
-      is_available "xz"
-
-      # Set the compression flag
       use_compression=1
       ;;
     x)
@@ -307,21 +299,21 @@ do
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
            "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]"
       echo
-      echo "-i   dependee input file (can be specified multiple times)"
-      echo "-f   file containing list of dependee input files (using absolute paths or paths" \
+      echo "-i    dependee input file (can be specified multiple times)"
+      echo "-f    file containing list of dependee input files (using absolute paths or paths" \
            "relative to this file) (can be specified multiple times)"
-      echo "-b   file or device to backup"
-      echo "-r   file to restore"
-      echo "-o   output file or device (uses stdout if not specified)"
-      echo "-d   string containing options passed to dd for reading in backup mode and writing" \
-           "in restore mode"
-      echo "-l   string containing options passed to xdelta3 for encoding"
-      echo "-c   use compression"
-      echo "-x   string containing options passed to xz for compression"
-      echo "-a   ask for confirmation before running command"
-      echo "-p   print command that would be run without running it"
-      echo "-q   quietly run command without printing it"
-      echo "-h   show help"
+      echo "-b    file or device to backup"
+      echo "-r    file to restore"
+      echo "-o    output file or device (uses stdout if not specified)"
+      echo "-d    string containing options passed to dd for reading in backup mode and writing" \
+           "in restore mode (default is \"status=progress\""
+      echo "-l    string containing options passed to xdelta3 for encoding"
+      echo "-c    use compression"
+      echo "-x    string containing options passed to xz for compression (default is \"-T 0\")"
+      echo "-a    ask for confirmation before running command"
+      echo "-p    print command that would be run without running it"
+      echo "-q    quietly run command without printing it"
+      echo "-h    show help"
       echo
       echo "Backup examples"
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
@@ -339,24 +331,39 @@ do
 done
 shift $((OPTIND - 1))
 
-# Make sure a backup file or a restore file was specified and not both
-if [[ -z "$backup_file" ]] && [[ -z "$restore_file" ]]
+# Check if the needed commands are available
+is_available "dd"
+is_available "xdelta3"
+if [[ $use_compression -eq 1 ]]
 then
-  echo "No backup file or restore file specified.  See help (-h) for details."
+  is_available "xz"
+fi
+
+# Make sure a backup file or a restore file was specified and not both
+if [[ -z "$backup_file" && -z "$restore_file" ]]
+then
+  echo "No backup file or restore file was specified.  See help (-h) for details."
   exit 1
 fi
-if [[ -n "$backup_file" ]] && [[ -n "$restore_file" ]]
+if [[ -n "$backup_file" && -n "$restore_file" ]]
 then
   echo "Both backup and restore file was specified.  See help (-h) for details."
   exit 1
 fi
 
 # Make sure none or only one of the a, p, or q options was specified
+if [[ ($ask_for_confirmation -eq 1 && $print_only -eq 1) || \
+  ($ask_for_confirmation -eq 1 && $quiet_mode -eq 1) || \
+  ($print_only -eq 1 && $quiet_mode -eq 1) ]]
+then
+  echo "Only one of the -a, -p, or -q options can be specified.  See help (-h) for details."
+  exit 1  
+fi
 
 # Make sure all input files exist and are not directories
 for input in "${input_files[@]}"
 do
-  if [[ ! -e "$input" ]] || [[ -d "$input" ]]
+  if [[ ! -e "$input" || -d "$input" ]]
   then
     echo "Input file $input does not exist."
     exit 1
@@ -387,9 +394,12 @@ else
   fi
 fi
 
+# TODO: change command to an array ... see http://mywiki.wooledge.org/BashFAQ/050 for more details
+
 # Check if print only is enabled
 if [[ $print_only -eq 1 ]]
 then
+  # Print the command and exit
   echo "$command"
   exit 0
 fi
@@ -397,26 +407,52 @@ fi
 # Check if quiet mode is enabled
 if [[ $quiet_mode -eq 1 ]]
 then
-  bash -c "$command"
+  # Run the command and exit returning the command's return value
+  eval "$command"
+
+  # TODO: Check if any of the commands failed
+
   exit $?
 fi
 
-# Check if ask for confirmation is disabled/enabled
+# Check if ask for confirmation is disabled
 if [[ $ask_for_confirmation -eq 0 ]]
 then
+  # Run the command and exit returning the command's return value
   echo "Running command: $command" >&2
-  bash -c "$command"
+  eval "$command"
+
+  # TODO: Check if any of the commands failed
+
   exit $?
-else
-  echo "Command that will be run: $command" >&2
-  read -p "Continue (Y/n)?" -n 1 -r
-  if [[ -n $REPLY ]]
-  then
-    echo >&2
-  fi
-  if [[ -z $REPLY ]] || [[ $REPLY =~ ^[Yy]$ ]]
-  then
-    bash -c "$command"
-    exit $?
-  fi
 fi
+
+# Ask for confirmation
+echo "Command that will be run: $command" >&2
+read -p "Continue (Y/n)?" -n 1 -r
+
+# Make things pretty
+if [[ -n $REPLY ]]
+then
+  echo >&2
+fi
+
+# Check if the user replied with an enter or y
+if [[ -z $REPLY || $REPLY =~ ^[Yy]$ ]]
+then
+  # Run the command and save the pipe status
+  eval "$command"';PIPERESULT=(${PIPESTATUS[@]})'
+
+  # Check if any of the commands failed
+  for status in "${PIPERESULT[@]}"
+  do
+    if [[ status -eq 1 ]]
+    then
+      return 1
+    fi
+  done
+
+  exit $?
+fi
+
+exit 1
