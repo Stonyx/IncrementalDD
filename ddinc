@@ -16,11 +16,15 @@
 # Cambridge, MA 02139, USA.
 
 # Create a function called to check if a needed command is available
-function is_available()
+function check_if_available()
 {
-  if ! command -v "$1" > /dev/null
+  # Save the passed in variables
+  local command="$1"
+
+  # Check if the command is not available
+  if ! command -v "$command" > /dev/null
   then
-    echo "Command $1 is required but is not available."
+    echo "Command $command is required but is not available." >&2
     exit 1
   fi
 }
@@ -39,30 +43,32 @@ function build_source_portion()
   for i in "${!input_files[@]}"
   do
     # Check if this is the first element in the array
-    if [[ $i -eq 0 ]]
+    if (( $i == 0 ))
     then
       # Check if compression is disabled/enabled and build the source portion for this full input
       # file
-      if [[ $use_compression -eq 0 ]]
+      if (( $use_compression == 0 ))
       then
         command="\"${input_files[$i]}\""
       else
-        command="<(xz -d -c \"${input_files[$i]}\")"
+        command="<(xz -d -c \"${input_files[$i]}\""
+        command="$command; echo \$? > \"$output_file.exit_codes\")"
       fi
     else
       # Build the source portion for this incremental input file
       command="<(xdelta3 -d -c -s $command"
 
       # Check if compression is disabled/enabled and continue building the source portion
-      if [[ $use_compression -eq 0 ]]
+      if (( $use_compression == 0 ))
       then
         command="$command \"${input_files[$i]}\""
       else
-        command="$command <(xz -d -c \"${input_files[$i]}\")"
+        command="$command <(xz -d -c \"${input_files[$i]}\""
+        command="$command; echo \$? > \"$output_file.exit_codes\")"
       fi
 
       # Finish building the source portion
-      command="$command)"
+      command="$command; echo \$? > \"$output_file.exit_codes\")"
     fi
   done
 
@@ -84,7 +90,7 @@ function build_full_backup_command()
   local command="dd if=\"$backup_file\"$dd_options"
 
   # Check if compression is enabled and continue building the command
-  if [[ $use_compression -eq 1 ]]
+  if (( $use_compression == 1 ))
   then
     command="$command | xz -z -c$xz_options"
   fi
@@ -115,10 +121,11 @@ function build_incremental_backup_command()
   local command="$(build_source_portion input_files[@] $use_compression)"
 
   # Build the command for an incremental backup
-  command="xdelta3 -e -c -s $command$xdelta_options <(dd if=\"$backup_file\"$dd_options)"
+  command="xdelta3 -e -c -s $command$xdelta_options <(dd if=\"$backup_file\"$dd_options"
+  command="$command; echo \$? > \"$output_file.exit_codes\")"
 
   # Check if compression is enabled and continue building the command
-  if [[ $use_compression -eq 1 ]]
+  if (( $use_compression == 1 ))
   then
     command="$command | xz -z -c$xz_options"
   fi
@@ -146,7 +153,7 @@ function build_full_restore_command()
   local command
 
   # Check if compression is disabled/enabled
-  if [[ $use_compression -eq 0 ]]
+  if (( $use_compression == 0 ))
   then
     # Build the command for a full restore
     command="dd if=\"$restore_file\""
@@ -191,11 +198,12 @@ function build_incremental_restore_command()
   command="xdelta3 -d -c -s $command"
 
   # Check if compression is disabled/enabled and continue building the command
-  if [[ $use_compression -eq 0 ]]
+  if (( $use_compression == 0 ))
   then
     command="$command \"$restore_file\""
   else
-    command="$command <(xz -d -c \"$restore_file\")"
+    command="$command <(xz -d -c \"$restore_file\""
+    command="$command; echo \$? > \"$output_file.exit_codes\")"
   fi
 
   # Check if an output file or dd options were specified and continue building the command
@@ -215,6 +223,66 @@ function build_incremental_restore_command()
 
   # Return the command for an incremental restore
   echo $command
+}
+
+# Create function called to run the command
+function run_command()
+{
+  # Save the passed in variables
+  local command="$1"
+  local output_file="$2"
+
+  # Declare needed variables
+  local -a pipe_exit_codes
+  local -i failed_commands=0
+
+  # Check if process substitutions are being used in the command
+  if [[ $command == *"<("*")"* ]]
+  then
+    # Create the exit codes named pipe
+    mkfifo "$output_file.exit_codes"
+  fi
+
+  # Check if pipes are being used in the command
+  if [[ $command == *"|"* ]]
+  then
+    # Run the command and save the pipe exit codes
+    eval "$command;"'pipe_exit_codes=(${PIPESTATUS[@]})' &
+
+    # Loop through the pipe exit codes and check if any of the commands failed
+    for exit_code in "${pipe_exit_codes[@]}"
+    do
+      if (( exit_code == 1 ))
+      then
+        failed_commands=$((failed_commands + 1))
+      fi
+    done
+  else
+    # Run the command
+    eval "$command"
+  fi  
+
+  # Check if process substitution is being used in the command
+  if [[ $command == *"<("*")"* ]]
+  then
+    # Declare needed variables
+    local -a process_sub_exit_codes
+
+    # Read the process substitution exit codes from the exit codes named pipe
+    readarray -t process_sub_exit_codes < "$output_file.exit_codes"
+
+    # Loop through the process substitution exit codes and check if any of the commands failed
+    for exit_code in "${process_sub_exit_codes[@]}"
+    do
+      if (( exit_code == 1 ))
+      then
+        failed_commands=$((failed_commands + 1))
+      fi
+    done
+  fi
+
+  # Return the number of failed commands
+  return $failed_commands
 }
 
 # Declare all options variables
@@ -297,33 +365,33 @@ do
       ;;
     h)
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
-           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]"
-      echo
-      echo "-i    dependee input file (can be specified multiple times)"
+           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]" >&2
+      echo >&2
+      echo "-i    dependee input file (can be specified multiple times)" >&2
       echo "-f    file containing list of dependee input files (using absolute paths or paths" \
-           "relative to this file) (can be specified multiple times)"
-      echo "-b    file or device to backup"
-      echo "-r    file to restore"
-      echo "-o    output file or device (uses stdout if not specified)"
+           "relative to this file) (can be specified multiple times)" >&2
+      echo "-b    file or device to backup" >&2
+      echo "-r    file to restore" >&2
+      echo "-o    output file or device (uses stdout if not specified)" >&2
       echo "-d    string containing options passed to dd for reading in backup mode and writing" \
-           "in restore mode (default is \"status=progress\""
-      echo "-l    string containing options passed to xdelta3 for encoding"
-      echo "-c    use compression"
-      echo "-x    string containing options passed to xz for compression (default is \"-T 0\")"
-      echo "-a    ask for confirmation before running command"
-      echo "-p    print command that would be run without running it"
-      echo "-q    quietly run command without printing it"
-      echo "-h    show help"
+           "in restore mode (default is \"status=progress\"" >&2
+      echo "-l    string containing options passed to xdelta3 for encoding" >&2
+      echo "-c    use compression" >&2
+      echo "-x    string containing options passed to xz for compression (default is \"-T 0\")" >&2
+      echo "-a    ask for confirmation before running command" >&2
+      echo "-p    print command that would be run without running it" >&2
+      echo "-q    quietly run command without printing it" >&2
+      echo "-h    show help" >&2
       echo
-      echo "Backup examples"
+      echo "Backup examples" >&2
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
-      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz"
+           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz" >&2
+      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz" >&2
       echo
-      echo "Restore examples"
+      echo "Restore examples" >&2
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
-      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda"
+           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda" >&2
+      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda" >&2
 
       exit 0
       ;;
@@ -332,31 +400,32 @@ done
 shift $((OPTIND - 1))
 
 # Check if the needed commands are available
-is_available "dd"
-is_available "xdelta3"
-if [[ $use_compression -eq 1 ]]
+check_if_available "dd"
+check_if_available "xdelta3"
+if (( $use_compression == 1 ))
 then
-  is_available "xz"
+  check_if_available "xz"
 fi
+check_if_available "mkfifo"
 
 # Make sure a backup file or a restore file was specified and not both
 if [[ -z "$backup_file" && -z "$restore_file" ]]
 then
-  echo "No backup file or restore file was specified.  See help (-h) for details."
+  echo "No backup file or restore file was specified.  See help (-h) for details." >&2
   exit 1
 fi
 if [[ -n "$backup_file" && -n "$restore_file" ]]
 then
-  echo "Both backup and restore file was specified.  See help (-h) for details."
+  echo "Both backup and restore file was specified.  See help (-h) for details." >&2
   exit 1
 fi
 
 # Make sure none or only one of the a, p, or q options was specified
-if [[ ($ask_for_confirmation -eq 1 && $print_only -eq 1) || \
-  ($ask_for_confirmation -eq 1 && $quiet_mode -eq 1) || \
-  ($print_only -eq 1 && $quiet_mode -eq 1) ]]
+if (( ($ask_for_confirmation == 1 && $print_only == 1) || \
+  ($ask_for_confirmation == 1 && $quiet_mode == 1) || 
+  ($print_only == 1 && $quiet_mode == 1) ))
 then
-  echo "Only one of the -a, -p, or -q options can be specified.  See help (-h) for details."
+  echo "Only one of the -a, -p, or -q options can be specified.  See help (-h) for details." >&2
   exit 1  
 fi
 
@@ -365,7 +434,7 @@ for input in "${input_files[@]}"
 do
   if [[ ! -e "$input" || -d "$input" ]]
   then
-    echo "Input file $input does not exist."
+    echo "Input file $input does not exist." >&2
     exit 1
   fi
 done
@@ -374,7 +443,7 @@ done
 if [[ -n "$backup_file" ]]
 then
   # Check if input files were specified and call the correct function to build the command
-  if [[ ${#input_files[@]} -eq 0 ]]
+  if (( ${#input_files[@]} == 0 ))
   then
     command="$(build_full_backup_command "$backup_file" "$output_file" "$dd_options" \
       "$use_compression" "$xz_options")"
@@ -384,7 +453,7 @@ then
   fi
 else
   # Check if input files were specified and call the correct function to build the command
-  if [[ ${#input_files[@]} -eq 0 ]]
+  if (( ${#input_files[@]} == 0 ))
   then
     command="$(build_full_restore_command "$restore_file" "$output_file" "$dd_options" \
       "$use_compression")"
@@ -394,41 +463,39 @@ else
   fi
 fi
 
-# TODO: change command to an array ... see http://mywiki.wooledge.org/BashFAQ/050 for more details
-
 # Check if print only is enabled
-if [[ $print_only -eq 1 ]]
+if (( $print_only == 1 ))
 then
   # Print the command and exit
-  echo "$command"
+  echo "${command//; echo \$? > \"$output_file.exit_codes\"/}"
   exit 0
 fi
 
 # Check if quiet mode is enabled
-if [[ $quiet_mode -eq 1 ]]
+if (( $quiet_mode == 1 ))
 then
-  # Run the command and exit returning the command's return value
-  eval "$command"
+  # Run the command
+  run_command "$command"
 
-  # TODO: Check if any of the commands failed
-
+  # Return the number of failed commands
   exit $?
 fi
 
 # Check if ask for confirmation is disabled
-if [[ $ask_for_confirmation -eq 0 ]]
+if (( $ask_for_confirmation == 0 ))
 then
-  # Run the command and exit returning the command's return value
-  echo "Running command: $command" >&2
-  eval "$command"
+  # Update the user
+  echo "Running command: ${command//; echo \$? > \"$output_file.exit_codes\"/}" >&2
 
-  # TODO: Check if any of the commands failed
+  # Run the command
+  run_command "$command" "$output_file"
 
+  # Return the number of failed commands
   exit $?
 fi
 
-# Ask for confirmation
-echo "Command that will be run: $command" >&2
+# Update the user and ask for confirmation
+echo "Command that will be run: ${command//; echo \$? > \"$output_file.exit_codes\"/}" >&2
 read -p "Continue (Y/n)?" -n 1 -r
 
 # Make things pretty
@@ -440,19 +507,11 @@ fi
 # Check if the user replied with an enter or y
 if [[ -z $REPLY || $REPLY =~ ^[Yy]$ ]]
 then
-  # Run the command and save the pipe status
-  eval "$command"';PIPERESULT=(${PIPESTATUS[@]})'
+  # Run the command
+  run_command "$command" "$output_file"
 
-  # Check if any of the commands failed
-  for status in "${PIPERESULT[@]}"
-  do
-    if [[ status -eq 1 ]]
-    then
-      return 1
-    fi
-  done
-
+  # Return the number of failed commands
   exit $?
 fi
 
-exit 1
+exit 255
