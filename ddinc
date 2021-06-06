@@ -416,7 +416,6 @@ if (( $use_compression == 1 ))
 then
   check_if_available "xz"
 fi
-check_if_available "mkfifo"
 
 # Make sure a backup file or a restore file was specified and not both
 if [[ -z "$backup_file" && -z "$restore_file" ]]
