@@ -51,8 +51,7 @@ function build_source_portion()
       then
         command="\"${input_files[$i]}\""
       else
-        command="<(xz -d -c \"${input_files[$i]}\""
-        command="$command; echo \$? > \"$output_file.exit_codes\")"
+        command="<(xz -d -c \"${input_files[$i]}\"; echo \$? >&3)"
       fi
     else
       # Build the source portion for this incremental input file
@@ -63,12 +62,11 @@ function build_source_portion()
       then
         command="$command \"${input_files[$i]}\""
       else
-        command="$command <(xz -d -c \"${input_files[$i]}\""
-        command="$command; echo \$? > \"$output_file.exit_codes\")"
+        command="$command <(xz -d -c \"${input_files[$i]}\"; echo \$? >&3)"
       fi
 
       # Finish building the source portion
-      command="$command; echo \$? > \"$output_file.exit_codes\")"
+      command="$command; echo \$? >&3)"
     fi
   done
 
@@ -122,7 +120,7 @@ function build_incremental_backup_command()
 
   # Build the command for an incremental backup
   command="xdelta3 -e -c -s $command$xdelta_options <(dd if=\"$backup_file\"$dd_options"
-  command="$command; echo \$? > \"$output_file.exit_codes\")"
+  command="$command; echo \$? >&3)"
 
   # Check if compression is enabled and continue building the command
   if (( $use_compression == 1 ))
@@ -202,8 +200,7 @@ function build_incremental_restore_command()
   then
     command="$command \"$restore_file\""
   else
-    command="$command <(xz -d -c \"$restore_file\""
-    command="$command; echo \$? > \"$output_file.exit_codes\")"
+    command="$command <(xz -d -c \"$restore_file\"; echo \$? >&3)"
   fi
 
   # Check if an output file or dd options were specified and continue building the command
@@ -230,56 +227,69 @@ function run_command()
 {
   # Save the passed in variables
   local command="$1"
-  local output_file="$2"
 
   # Declare needed variables
-  local -a pipe_exit_codes
+  local -a exit_codes
   local -i failed_commands=0
 
-  # Check if process substitutions are being used in the command
-  if [[ $command == *"<("*")"* ]]
-  then
-    # Create the exit codes named pipe
-    mkfifo "$output_file.exit_codes"
-  fi
+  # Create an anonymous file descriptor
+  exec 3<> <(:)
 
-  # Check if pipes are being used in the command
-  if [[ $command == *"|"* ]]
+  # Check if creating the anonymous file descriptor succeeded
+  if (( $? == 0 ))
   then
-    # Run the command and save the pipe exit codes
-    eval "$command;"'pipe_exit_codes=(${PIPESTATUS[@]})' &
+    # Trap the exit signal to make sure we close the anonymouse file descriptor in case of an
+    #   unexpected exit
+    trap "exec 3>&-" EXIT
+   
+    # Check if pipes are being used in the command and run the command
+    if [[ $command == *"|"* ]]
+    then
+      eval "$command; printf \"%s\\n\" \"\${PIPESTATUS[@]}\" >&3"
+    else
+      eval "$command; echo \$? >&3"
+    fi
 
-    # Loop through the pipe exit codes and check if any of the commands failed
-    for exit_code in "${pipe_exit_codes[@]}"
+    # Loop while reading data from the anonymous file descriptor by first checking if data is
+    #   available and then reading it
+    declare -i i=0
+    while read -u 3 -t 0 && read -r -u 3 exit_code
     do
-      if (( exit_code == 1 ))
-      then
-        failed_commands=$((failed_commands + 1))
-      fi
-    done
+      # Save the data to an array
+      exit_codes[$i]="$exit_code"
+      i=$(($i + 1))
+    done    
+
+    # Close the anonymouse file descriptor
+    exec 3>&-
+
+    # Unset the exit trap
+    trap - EXIT
   else
-    # Run the command
-    eval "$command"
-  fi  
+    # Update the user
+    echo "This system does not support creating anonymous file descriptors using <(:).  Not all" \
+      "exit codes will be checked." >&2
 
-  # Check if process substitution is being used in the command
-  if [[ $command == *"<("*")"* ]]
-  then
-    # Declare needed variables
-    local -a process_sub_exit_codes
+    # Remove the exit code capturing from the command
+    command="${command//echo \$? >&3/}"
 
-    # Read the process substitution exit codes from the exit codes named pipe
-    readarray -t process_sub_exit_codes < "$output_file.exit_codes"
-
-    # Loop through the process substitution exit codes and check if any of the commands failed
-    for exit_code in "${process_sub_exit_codes[@]}"
-    do
-      if (( exit_code == 1 ))
-      then
-        failed_commands=$((failed_commands + 1))
-      fi
-    done
+    # Check if pipes are being used in the command and run the command
+    if [[ $command == *"|"* ]]
+    then
+      eval "$command; exit_codes=(\"\${PIPESTATUS[@]}\")"
+    else
+      eval "$command; exit_codes=(\$?)"
+    fi
   fi
+
+  # Loop through the exit codes array and count how many commands failed
+  for exit_code in "${exit_codes[@]}"
+  do
+    if (( exit_code == 1 ))
+    then
+      failed_commands=$((failed_commands + 1))
+    fi
+  done
 
   # Return the number of failed commands
   return $failed_commands
@@ -306,7 +316,7 @@ do
       input_files+=("$OPTARG")
       ;;
     f)
-      # Read the file paths into an array
+      # Read the file paths and save them in an array
       declare -a paths
       mapfile -t paths < "$OPTARG"
 
@@ -365,33 +375,33 @@ do
       ;;
     h)
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
-           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]" >&2
-      echo >&2
-      echo "-i    dependee input file (can be specified multiple times)" >&2
+           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]"
+      echo
+      echo "-i    dependee input file (can be specified multiple times)"
       echo "-f    file containing list of dependee input files (using absolute paths or paths" \
-           "relative to this file) (can be specified multiple times)" >&2
-      echo "-b    file or device to backup" >&2
-      echo "-r    file to restore" >&2
-      echo "-o    output file or device (uses stdout if not specified)" >&2
+           "relative to this file) (can be specified multiple times)"
+      echo "-b    file or device to backup"
+      echo "-r    file to restore"
+      echo "-o    output file or device (uses stdout if not specified)"
       echo "-d    string containing options passed to dd for reading in backup mode and writing" \
-           "in restore mode (default is \"status=progress\"" >&2
-      echo "-l    string containing options passed to xdelta3 for encoding" >&2
-      echo "-c    use compression" >&2
-      echo "-x    string containing options passed to xz for compression (default is \"-T 0\")" >&2
-      echo "-a    ask for confirmation before running command" >&2
-      echo "-p    print command that would be run without running it" >&2
-      echo "-q    quietly run command without printing it" >&2
-      echo "-h    show help" >&2
+           "in restore mode (default is \"status=progress\""
+      echo "-l    string containing options passed to xdelta3 for encoding"
+      echo "-c    use compression"
+      echo "-x    string containing options passed to xz for compression (default is \"-T 0\")"
+      echo "-a    ask for confirmation before running command"
+      echo "-p    print command that would be run without running it"
+      echo "-q    quietly run command without printing it"
+      echo "-h    show help"
       echo
-      echo "Backup examples" >&2
+      echo "Backup examples"
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz" >&2
-      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz" >&2
+           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
+      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz"
       echo
-      echo "Restore examples" >&2
+      echo "Restore examples"
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda" >&2
-      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda" >&2
+           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
+      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda"
 
       exit 0
       ;;
@@ -467,7 +477,7 @@ fi
 if (( $print_only == 1 ))
 then
   # Print the command and exit
-  echo "${command//; echo \$? > \"$output_file.exit_codes\"/}"
+  echo "${command//; echo \$? >&3/}"
   exit 0
 fi
 
@@ -485,7 +495,7 @@ fi
 if (( $ask_for_confirmation == 0 ))
 then
   # Update the user
-  echo "Running command: ${command//; echo \$? > \"$output_file.exit_codes\"/}" >&2
+  echo "Running command: ${command//; echo \$? >&3/}" >&2
 
   # Run the command
   run_command "$command" "$output_file"
@@ -495,7 +505,7 @@ then
 fi
 
 # Update the user and ask for confirmation
-echo "Command that will be run: ${command//; echo \$? > \"$output_file.exit_codes\"/}" >&2
+echo "Command that will be run: ${command//; echo \$? >&3/}" >&2
 read -p "Continue (Y/n)?" -n 1 -r
 
 # Make things pretty
@@ -514,4 +524,5 @@ then
   exit $?
 fi
 
+# Return 255 to signal that the user aborted running the command
 exit 255
