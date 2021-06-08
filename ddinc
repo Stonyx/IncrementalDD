@@ -15,7 +15,7 @@
 # http://www.gnu.org/copyleft/gpl.html or write to The Free Software Foundation, 675 Mass Ave,
 # Cambridge, MA 02139, USA.
 
-# Create a function called to check if a needed command is available
+# Create a function called to check if a required command is available
 function check_if_available()
 {
   # Save the passed in variables
@@ -32,11 +32,11 @@ function check_if_available()
 # Create a function called to build the source portion of the command
 function build_source_portion()
 {
-  # Save passed in variables
+  # Save the passed in variables
   input_files=("${!1}")
   local -i use_compression=$2
 
-  # Declare local variables
+  # Declare needed variables
   local command
 
   # Loop through the input files array and build the xdelta3 source portion of the command
@@ -71,13 +71,13 @@ function build_source_portion()
   done
 
   # Return the source portion of the command
-  echo $command
+  echo "$command"
 }
 
 # Create a function called to build a full backup command
 function build_full_backup_command()
 {
-  # Save passed in variables
+  # Save the passed in variables
   local backup_file="$1"
   local output_file="$2"
   local dd_options="$3"
@@ -100,13 +100,13 @@ function build_full_backup_command()
   fi
 
   # Return the command for a full backup
-  echo $command
+  echo "$command"
 }
 
 # Create a function called to build an incremental backup command
 function build_incremental_backup_command()
 {
-  # Save passed in variables
+  # Save the passed in variables
   input_files=("${!1}")
   local backup_file="$2"
   local output_file="$3"
@@ -135,19 +135,19 @@ function build_incremental_backup_command()
   fi
 
   # Return the command for an incremental backup
-  echo $command
+  echo "$command"
 }
 
 # Create a function called to build a full restore command
 function build_full_restore_command()
 {
-  # Save passed in variables
+  # Save the passed in variables
   local restore_file="$1"
   local output_file="$2"
   local dd_options="$3"
   local -i use_compression=$4
 
-  # Declare local variables
+  # Declare needed variables
   local command
 
   # Check if compression is disabled/enabled
@@ -176,7 +176,7 @@ function build_full_restore_command()
   command="$command$dd_options"
 
   # Return the command for a full restore
-  echo $command
+  echo "$command"
 }
 
 # Create a function called to build an incremental restore command
@@ -219,7 +219,7 @@ function build_incremental_restore_command()
   command="$command$dd_options"
 
   # Return the command for an incremental restore
-  echo $command
+  echo "$command"
 }
 
 # Create function called to run the command
@@ -260,11 +260,11 @@ function run_command()
       i=$(($i + 1))
     done    
 
-    # Close the anonymouse file descriptor
-    exec 3>&-
-
     # Unset the exit trap
     trap - EXIT
+
+    # Close the anonymouse file descriptor
+    exec 3>&-
   else
     # Update the user
     echo "This system does not support creating anonymous file descriptors using <(:).  Not all" \
@@ -295,14 +295,14 @@ function run_command()
   return $failed_commands
 }
 
-# Declare all options variables
-declare -a input_files
-declare backup_file
-declare restore_file
-declare output_file
+# Declare options variables and define default values
+declare -a input_files=()
+declare backup_file=""
+declare restore_file=""
+declare output_file=""
 declare dd_options=" status=progress"
-declare xdelta_options=" -T 0"
-declare xz_options
+declare xdelta_options=""
+declare xz_options=" -T 0"
 declare -i use_compression=0
 declare -i ask_for_confirmation=0
 declare -i print_only=0
@@ -320,13 +320,13 @@ do
       declare -a paths
       mapfile -t paths < "$OPTARG"
 
-      # Get the dependees file path (without relying on dirname command)
-      declare dependees_file_path
+      # Get the dependees file directory (without relying on dirname command)
+      declare dependees_file_directory
       if [[ "$OPTARG" != *"/"* ]]
       then
-        dependees_file_path="."
+        dependees_file_directory="."
       else
-        dependees_file_path="${OPTARG%/*}"
+        dependees_file_directory="${OPTARG%/*}"
       fi
 
       # Loop through the file paths
@@ -335,8 +335,8 @@ do
         # Check if the path is relative
         if [[ "${paths[$i]}" != "/"* ]]
         then
-          # Prepend the dependees file path to the path
-          paths[$i]="$dependees_file_path/${paths[$i]}"
+          # Prepend the dependees file directory to the path
+          paths[$i]="$dependees_file_directory/${paths[$i]}"
         fi
       done
 
@@ -375,7 +375,7 @@ do
       ;;
     h)
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
-           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-a | -p | -q)]"
+           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-p | -q | -a)]"
       echo
       echo "-i    dependee input file (can be specified multiple times)"
       echo "-f    file containing list of dependee input files (using absolute paths or paths" \
@@ -388,20 +388,20 @@ do
       echo "-l    string containing options passed to xdelta3 for encoding"
       echo "-c    use compression"
       echo "-x    string containing options passed to xz for compression (default is \"-T 0\")"
-      echo "-a    ask for confirmation before running command"
       echo "-p    print command that would be run without running it"
       echo "-q    quietly run command without printing it"
+      echo "-a    ask for confirmation before running command"
       echo "-h    show help"
       echo
       echo "Backup examples"
-      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -b /dev/sda -o sda.dd.xdelta.xz"
-      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta.xz"
+      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta3.xz" \
+           "-i ../march/sda.dd.xdelta3.xz -b /dev/sda -o sda.dd.xdelta3.xz"
+      echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta3.xz"
       echo
       echo "Restore examples"
-      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta.xz" \
-           "-i ../march/sda.dd.xdelta.xz -r sda.dd.xdelta.xz -o /dev/sda"
-      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta.xz -o /dev/sda"
+      echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta3.xz" \
+           "-i ../march/sda.dd.xdelta3.xz -r sda.dd.xdelta3.xz -o /dev/sda"
+      echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta3.xz -o /dev/sda"
 
       exit 0
       ;;
@@ -429,12 +429,12 @@ then
   exit 1
 fi
 
-# Make sure none or only one of the a, p, or q options was specified
-if (( ($ask_for_confirmation == 1 && $print_only == 1) || \
-  ($ask_for_confirmation == 1 && $quiet_mode == 1) || 
-  ($print_only == 1 && $quiet_mode == 1) ))
+# Make sure none or only one of the p, q, or a options was specified
+if (( ($print_only == 1 && $quiet_mode == 1) || \
+  ($print_only == 1 && $ask_for_confirmation == 1) || \
+  ($quiet_mode == 1 && $ask_for_confirmation == 1) ))
 then
-  echo "Only one of the -a, -p, or -q options can be specified.  See help (-h) for details." >&2
+  echo "Only one of the -p, -q, or -a options can be specified.  See help (-h) for details." >&2
   exit 1  
 fi
 
@@ -448,10 +448,14 @@ do
   fi
 done
 
+# Declare needed variables
+declare command
+
 # Check if a backup file was specified
 if [[ -n "$backup_file" ]]
 then
-  # Check if input files were specified and call the correct function to build the command
+  # Check the size of the input file array and call the correct function to build the backup
+  #   command
   if (( ${#input_files[@]} == 0 ))
   then
     command="$(build_full_backup_command "$backup_file" "$output_file" "$dd_options" \
@@ -461,7 +465,8 @@ then
       "$dd_options" "$xdelta_options" "$use_compression" "$xz_options")"
   fi
 else
-  # Check if input files were specified and call the correct function to build the command
+  # Check the size of the input file array and call the correct function to build the restore
+  #   command
   if (( ${#input_files[@]} == 0 ))
   then
     command="$(build_full_restore_command "$restore_file" "$output_file" "$dd_options" \
