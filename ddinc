@@ -15,6 +15,9 @@
 # http://www.gnu.org/copyleft/gpl.html or write to The Free Software Foundation, 675 Mass Ave,
 # Cambridge, MA 02139, USA.
 
+# Enable checking for undefined variables
+set -o nounset
+
 # Create a function called to check if a required command is available
 function check_if_available()
 {
