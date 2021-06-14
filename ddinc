@@ -32,6 +32,30 @@ function check_if_available()
   fi
 }
 
+# Create a function called to count the number of occurances of a substring in a string
+function count_substring_in_string()
+{
+  # Save the passed in variables
+  local substring="$1"
+  local string="$2"
+
+  # Declare needed variables
+  local -i count=0
+
+  # Loop until the string has no more occurances of the substring
+  while [[ "$string" == *"$substring"* ]]
+  do
+    # Remove the first occurance of the substring from the string
+    string="${string/$substring/}"
+
+    # Increase the counter
+    count=$((count + 1))
+  done
+
+  # Return the number of times the substring occurred in the string
+  return $count
+}
+
 # Create a function called to build the source portion of the command
 function build_source_portion()
 {
@@ -233,7 +257,7 @@ function run_command()
 
   # Declare needed variables
   local -a exit_codes
-  local -i failed_commands=0
+  local -i exit_codes_expected=1
 
   # Create an anonymous file descriptor
   exec 3<> <(:)
@@ -245,6 +269,13 @@ function run_command()
     #   unexpected exit
     trap "exec 3>&-" EXIT
    
+    # Calculate the number of exit codes to expect by counting the number of echos to file 
+    #   descriptor 3 and the number of pipes
+    count_substring_in_string "echo \$? >&3" "$command"
+    exit_codes_expected=$((exit_codes_expected + $?))
+    count_substring_in_string "|" "$command"
+    exit_codes_expected=$((exit_codes_expected + $?))
+
     # Check if pipes are being used in the command and run the command
     if [[ $command == *"|"* ]]
     then
@@ -276,6 +307,10 @@ function run_command()
     # Remove the exit code capturing from the command
     command="${command//echo \$? >&3/}"
 
+    # Calculate the number of exit codes to expect by counting the number of pipes
+    count_substring_in_string "|" "$command"
+    exit_codes_expected=$((exit_codes_expected + $?))
+
     # Check if pipes are being used in the command and run the command
     if [[ $command == *"|"* ]]
     then
@@ -285,17 +320,20 @@ function run_command()
     fi
   fi
 
-  # Loop through the exit codes array and count how many commands failed
+  # Declare needed variables
+  local -i succeeded_commands=0
+
+  # Loop through the exit codes array and count how many commands succeeded
   for exit_code in "${exit_codes[@]}"
   do
-    if (( exit_code == 1 ))
+    if (( exit_code == 0 ))
     then
-      failed_commands=$((failed_commands + 1))
+      succeeded_commands=$((succeeded_commands + 1))
     fi
   done
 
   # Return the number of failed commands
-  return $failed_commands
+  return $((exit_codes_expected - succeeded_commands))
 }
 
 # Declare options variables and define default values
@@ -378,16 +416,16 @@ do
       ;;
     h)
       echo "Usage: ddinc [-i file] [-f file] (-b file_or_device | -r file) [-o file_or_device]" \
-           "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-p | -q | -a)]"
+        "[-d dd_options] [-l xdelta3 options] [-c] [-x xz_options] [(-p | -q | -a)]"
       echo
       echo "-i    dependee input file (can be specified multiple times)"
       echo "-f    file containing list of dependee input files (using absolute paths or paths" \
-           "relative to this file) (can be specified multiple times)"
+        "relative to this file) (can be specified multiple times)"
       echo "-b    file or device to backup"
       echo "-r    file to restore"
       echo "-o    output file or device (uses stdout if not specified)"
       echo "-d    string containing options passed to dd for reading in backup mode and writing" \
-           "in restore mode (default is \"status=progress\""
+        "in restore mode (default is \"status=progress\""
       echo "-l    string containing options passed to xdelta3 for encoding"
       echo "-c    use compression"
       echo "-x    string containing options passed to xz for compression (default is \"-T 0\")"
@@ -398,12 +436,12 @@ do
       echo
       echo "Backup examples"
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta3.xz" \
-           "-i ../march/sda.dd.xdelta3.xz -b /dev/sda -o sda.dd.xdelta3.xz"
+        "-i ../march/sda.dd.xdelta3.xz -b /dev/sda -o sda.dd.xdelta3.xz"
       echo "ddinc -f sda.dd.dependees -b /dev/sda -o sda.dd.xdelta3.xz"
       echo
       echo "Restore examples"
       echo "ddinc -i ../january/sda.dd.xz -i ../february/sda.dd.xdelta3.xz" \
-           "-i ../march/sda.dd.xdelta3.xz -r sda.dd.xdelta3.xz -o /dev/sda"
+        "-i ../march/sda.dd.xdelta3.xz -r sda.dd.xdelta3.xz -o /dev/sda"
       echo "ddinc -f sda.dd.dependees -r sda.dd.xdelta3.xz -o /dev/sda"
 
       exit 0
@@ -437,7 +475,7 @@ if (( ($print_only == 1 && $quiet_mode == 1) || \
   ($print_only == 1 && $ask_for_confirmation == 1) || \
   ($quiet_mode == 1 && $ask_for_confirmation == 1) ))
 then
-  echo "Only one of the -p, -q, or -a options can be specified.  See help (-h) for details." >&2
+  echo "Only one of -p, -q, or -a options can be specified.  See help (-h) for details." >&2
   exit 1  
 fi
 
